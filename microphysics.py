@@ -13,11 +13,10 @@ from pyrcel import constants as c
 from pyrcel import thermo
 from scipy.optimize import bisect
 import numpy as np
-from numba.pycc import CC
 
 rho_h2o = 1000.     # density of water, kg/m^3
 sig_h2o = 71.97/1000.  # surface tenstion of water, J/m^2
-Cp_h2o_vapor = 1000.    # heat capacity of water vapor, J/(kg*K)
+Cp_h2o_vapor = 1860.    # approximate near-room-temperature vapor heat capacity, J/(kg*K)
 Cp_h2o = 4184. # heat capacity of liquid water, J/(kg*K)
 k_h2o_vapor = 25.95/1e3 # thermal conductivity of water vapor, W/(m*K)
 Lv = 2450.9*1e3 # enthalpy of vaporization of water vapor?, J/kg
@@ -30,13 +29,11 @@ M_h2o = 18./1000. # kg/mol
 M_co2 = 44./1000. # kg/mol
 
 
-auxcc = CC("parcel_aux_numba")
-auxcc.verbose = True
-N_STATE_VARS = c.N_STATE_VARS
 
 
-def SuperSaturationRatio(mixing_ratio, temperature):
-    p = 1000 # Atmospheric pressure (hPa)
+
+def SuperSaturationRatio(mixing_ratio, temperature, P=100000.):
+    p = P/100. # Atmospheric pressure (hPa); legacy default retained
     To = temperature-273.15 #Convert to degrees C
     #Saturated vapor pressure (T)
     psat = 6.1094*np.exp(17.625*To/(243.04+To)) #(hPa)
@@ -47,6 +44,12 @@ def SuperSaturationRatio(mixing_ratio, temperature):
     return SS
 
 def MixingRatio(saturation_ratio,T,P):
+    saturation_ratio=np.asarray(saturation_ratio,dtype=float)
+    T=np.asarray(T,dtype=float)
+    P=np.asarray(P,dtype=float)
+    if (np.any(~np.isfinite(T)) or np.any(T<=0) or np.any(~np.isfinite(P))
+            or np.any(P<=0) or np.any(~np.isfinite(saturation_ratio))):
+        raise ValueError('Mixing ratio requires finite temperature, pressure, and supersaturation')
     p = P/100 # Atmospheric pressure (hPa)
     #R = 8.314    # Gas constant
     To = T-273.15 #Convert to degrees C
@@ -56,12 +59,28 @@ def MixingRatio(saturation_ratio,T,P):
     psat = 6.1094*np.exp(17.625*To/(243.04+To)) #(hPa)
     # Vapor pressure at saturation_ratio
     pv = psat*(saturation_ratio+1.)
-    mixing_ratio = 0.662*pv/(p-pv)
+    if np.any(pv<0) or np.any(pv>=p) or np.any(~np.isfinite(pv)):
+        raise ValueError('Vapor pressure must satisfy 0 <= vapor pressure < total pressure')
+    mixing_ratio = c.epsilon*pv/(p-pv)
     
     return mixing_ratio
 
 def equilibrate_h2o(dry_diameters, kappas, Ns, temp, SS, P):
     
+    dry_diameters=np.asarray(dry_diameters,dtype=float)
+    kappas=np.asarray(kappas,dtype=float)
+    Ns=np.asarray(Ns,dtype=float)
+    if (dry_diameters.ndim!=1 or not len(dry_diameters)
+            or kappas.shape!=dry_diameters.shape or Ns.shape!=dry_diameters.shape
+            or np.any(~np.isfinite(dry_diameters)) or np.any(dry_diameters<=0)
+            or np.any(~np.isfinite(kappas)) or np.any(kappas<=0)
+            or np.any(~np.isfinite(Ns)) or np.any(Ns<0)):
+        raise ValueError('Equilibrium requires matching finite populations, positive diameters and kappa, and nonnegative number')
+    if (not all(np.isfinite(value) for value in (temp,SS,P)) or temp<=0 or P<=0):
+        raise ValueError('Equilibrium requires finite positive temperature and pressure')
+    vapor_pressure=(SS+1.)*thermo.es(temp-273.15)
+    if not 0<=vapor_pressure<P:
+        raise ValueError('Vapor pressure must satisfy 0 <= vapor pressure < total pressure')
     dry_radii = dry_diameters/2
     f = lambda r, dry_radius, kappa: thermo.Seq(r, dry_radius, temp, kappa) - SS
     diameters = []
@@ -76,7 +95,8 @@ def equilibrate_h2o(dry_diameters, kappas, Ns, temp, SS, P):
     diameters = np.array(diameters) # diameter of particles in m
     
     # intial parcel thermodynamic properties 
-    mixing_ratio = (SS + 1.0) * (c.epsilon * thermo.es(temp - 273.15) / (P - thermo.es(temp - 273.15))) # kg water vapor per kg air
+    vapor_pressure = (SS + 1.0) * thermo.es(temp - 273.15)
+    mixing_ratio = c.epsilon * vapor_pressure / (P - vapor_pressure) # kg vapor/kg dry air
     
     mass_water = (   # kg liquid water per m^3
         lambda radius, dry_radius, Ni: (4.0 * np.pi / 3.0)
@@ -215,7 +235,7 @@ def one_particle(y, t, mixing_ratio, SS, T, P, dry_diameter, kappa, N, accom, rh
     if ignore_Tp:
         ## Non-continuum diffusivity/thermal conductivity of air near
         ## near particle, m^2/s
-        dv_r = thermo.dv(T, Rp, P, accom) # Non-continuum diffusivity of water vapor, m^2/s
+        dv_r = dv(T, Rp, P, accom) # Non-continuum diffusivity of water vapor, m^2/s
         ka_r = thermo.ka(T, rho_air, Rp) # Non-continuum thermal conductivity of air near particle, J/(s*m*K)
         
         ## Condensation coefficient, m^2/s
@@ -230,90 +250,31 @@ def one_particle(y, t, mixing_ratio, SS, T, P, dry_diameter, kappa, N, accom, rh
         
         dTp_dt = 0. # K/s
     else:
-        q = np.hstack([Dp,Tp])
-        dmp_dt, dTp_dt = get_odesystem_droplet(t, q, dry_diameter, kappa, rho_aero, T, SS+1., accom, udiff_fun=lambda t: 0., p=101325.)
+        q = np.array([mass_from_diameter(Dp, dry_diameter, rho_aero), Tp])
+        dmp_dt, dTp_dt = get_odesystem_droplet(t, q, dry_diameter, kappa, rho_aero, T, SS+1., accom, udiff_fun=lambda t: 0., p=P)
         dr_dt = dmp_dt / (4.0 * np.pi * c.rho_w * Rp * Rp) # m/s 
         
     dDp_dt = 2.*dr_dt # m/s
     dydt = np.hstack([dDp_dt, dTp_dt])
     return dydt
     
-def one_particle_lny(lny, t, mixing_ratio, SS, T, P, dry_diameter, kappa, N, accom, rho_aero,ignore_Tp=False):
-    y = np.exp(lny)
-    T_c = T - 273.15  # convert temperature to Celsius
-    pv_sat = thermo.es(T_c)  # saturation vapor pressure
-    Tv = (1.0 + 0.61 * mixing_ratio) * T # K
-
-    ## Compute air densities from current state
-    rho_air = P / (c.Rd * Tv) # kg/m^3
-    
-    Dp = y[0]
-    Tp = y[1]
-    dry_radius = dry_diameter/2.
-    Rp = Dp/2.
-    
-    if ignore_Tp:
-        dv_r = thermo.dv(T, Rp, P, accom) # Non-continuum diffusivity of water vapor, m^2/s
-        ka_r = thermo.ka(T, rho_air, Rp) # Non-continuum thermal conductivity of air near particle, J/(s*m*K)
-
-        ## Condensation coefficient
-        G_a = (c.rho_w * c.R * T) / (pv_sat * dv_r * c.Mw) # s/m^2
-        G_b = (c.L * c.rho_w * ((c.L * c.Mw / (c.R * T)) - 1.0)) / (ka_r * T) # s/m^2
-        G = 1.0 / (G_a + G_b) # m^2/s
-    
-        ## Difference between ambient and particle equilibrium supersaturation
-        Seq_r = thermo.Seq(Rp, dry_radius, T, kappa)
-        delta_SS = SS - Seq_r
-        dr_dt = (G / Rp) * delta_SS  # m/s
-        dTp_dt = 0. # K/s
-    else:
-        q = np.hstack([Dp,Tp])
-        dmp_dt, dTp_dt = get_odesystem_droplet(t, q, dry_diameter, kappa, rho_aero, T, SS+1., udiff_fun=lambda t: 0., p=101325.)
-        dr_dt = dmp_dt / (4.0 * np.pi * c.rho_w * Rp * Rp)
-    dDp_dt = 2.*dr_dt # m/s
-    dlnydt = np.hstack([dDp_dt/Dp, dTp_dt/Tp])
-    
-    return dlnydt
+def one_particle_lny(lny, t, mixing_ratio, SS, T, P, dry_diameter, kappa, N, accom, rho_aero, ignore_Tp=False):
+    # The inactive temperature coordinate may receive arbitrarily large
+    # finite-difference probes from an implicit solver; it must stay inactive.
+    with np.errstate(over='raise', invalid='raise'):
+        state = np.array([np.exp(lny[0]), T]) if ignore_Tp else np.exp(lny)
+    derivative = one_particle(state, t, mixing_ratio, SS, T, P, dry_diameter,
+                              kappa, N, accom, rho_aero, ignore_Tp=ignore_Tp)
+    return derivative / state
 
 def one_particle_lnDp(lny, t, mixing_ratio, SS, T, P, dry_diameter, kappa, N, accom, rho_aero, ignore_Tp=False):
-    y = lny.copy
-    y[range(0,lny,2)] = np.exp(lny[range(0,lny,2)])
-    T_c = T - 273.15  # convert temperature to Celsius
-    pv_sat = thermo.es(T_c)  # saturation vapor pressure
-    Tv = (1.0 + 0.61 * mixing_ratio) * T # K
-    
-    ## Compute air densities from current state
-    rho_air = P / (c.Rd * Tv) # kg/m^3
-    
-    Dp = y[0]
-    Tp = y[1]
-    dry_radius = dry_diameter/2.
-    Rp = Dp/2.
-    
-    if ignore_Tp:
-        ## Non-continuum diffusivity/thermal conductivity of air near
-        ## near particle
-        dv_r = thermo.dv(T, Rp, P, accom) # Non-continuum diffusivity of water vapor, m^2/s
-        ka_r = thermo.ka(T, rho_air, Rp) # Non-continuum thermal conductivity of air near particle, J/(s*m*K)
-    
-        ## Condensation coefficient
-        G_a = (c.rho_w * c.R * T) / (pv_sat * dv_r * c.Mw) # s/m^2
-        G_b = (c.L * c.rho_w * ((c.L * c.Mw / (c.R * T)) - 1.0)) / (ka_r * T) # s/m^2
-        G = 1.0 / (G_a + G_b) # m^2/s
-    
-        ## Difference between ambient and particle equilibrium supersaturation
-        Seq_r = thermo.Seq(Rp, dry_radius, T, kappa)
-        delta_SS = SS - Seq_r
-        dr_dt = (G / Rp) * delta_SS  # m/s
-        dTp_dt = 0. # K/s
-    else:
-        q = np.hstack([Dp,Tp])
-        dmp_dt, dTp_dt = get_odesystem_droplet(t, q, dry_diameter, kappa, rho_aero, T, SS+1., udiff_fun=lambda t: 0., p=101325.)
-        dr_dt = dmp_dt / (4.0 * np.pi * c.rho_w * Rp * Rp) # m/s
-    dDp_dt = 2.*dr_dt # m/s
-#    dydt = np.hstack([dDp_dt,dTp_dt])
-    dlnydt = np.hstack([dDp_dt/Dp, dTp_dt])
-    return dlnydt
+    state = np.array(lny, dtype=float, copy=True)
+    with np.errstate(over='raise', invalid='raise'):
+        state[0] = np.exp(state[0])
+    derivative = one_particle(state, t, mixing_ratio, SS, T, P, dry_diameter,
+                              kappa, N, accom, rho_aero, ignore_Tp=ignore_Tp)
+    derivative[0] /= state[0]
+    return derivative
     
 ## Auxiliary, single-value calculations with GIL released for derivative
 ## calculations
@@ -334,7 +295,7 @@ def ka(T, r, rho):
 def dv(T, r, P, accom):
     """See :func:`pyrcel.thermo.dv` for full documentation
     """
-    P_atm = P * 1.01325e-5  # Pa -> atm
+    P_atm = P / 101325.0  # Pa -> atm
     dv_cont = 1e-4 * (0.211 / P_atm) * ((T / 273.0) ** 1.94)
     denom = 1.0 + (dv_cont / (accom * r)) * np.sqrt(
         (2 * np.pi * c.Mw) / (c.R * T)
@@ -361,17 +322,18 @@ def get_odesystem_droplet(t, q, Dd, tkappa, rho_aero, Tv, Sv, accom, udiff_fun=l
     Dp = ((mp*6/np.pi - Dd**3*(rho_aero - rho_h2o))/rho_h2o)**(1./3.)
     
     lamb = 1.6 # constant between 1.6 and 2
-    if abs(Tv**(2-lamb)-Tp**(2-lamb)) > 0:
-        C_T = (Tv - Tp)/Tv**(lamb-1.)*(2-lamb)/(Tv**(2-lamb)-Tp**(2-lamb))
-    else:
-        C_T = 1.
+    # Stable continuous limit as Tp approaches Tv. Subtracting powers of
+    # nearly identical temperatures otherwise changes equivalent log states.
+    delta = (Tp - Tv) / Tv
+    exponent = 2. - lamb
+    C_T = 1. if delta == 0. else exponent*delta / np.expm1(exponent*np.log1p(delta))
     
     p_d = droplet_vapor_pressure(Dp, Dd, tkappa, Tp) # droplet vapor pressure, Pa
     p_v = vapor_pressure(Sv, Tv) # vapor pressure, Pa
     udiff = udiff_fun(t) # not sure, might be in m/s, always zero
-    Re = particle_Re(udiff, Dp, Tv, Sv) # Reynolds number, unitless
-    Sc = particle_Sc(Dp, Tv, Sv) # Schmidt number, unitless
-    Pr = particle_Pr(Tv, Sv, accom, Dp) # Prandtl number, unitless
+    Re = particle_Re(udiff, Dp, Tv, Sv, p=p) # Reynolds number, unitless
+    Sc = particle_Sc(Dp, Tv, Sv, p=p) # Schmidt number, unitless
+    Pr = particle_Pr(Tv, Sv, accom, Dp, p=p) # Prandtl number, unitless
     Sh = 1+0.38*Re**(1/2)*Sc**(1/3) # Sherwood number, unitless, chen et al.
     dmdt = 2*np.pi*p*Dp*M_h2o*D_inf*C_T*Sh/(c.R*Tv)*np.log((p-p_d)/(p-p_v)) # 
     
@@ -444,17 +406,19 @@ def water_vapor_diffusion_coefficient(Tv):
     diffusion_coeff = 0.211/100**2 * (Tv/273.15)**1.94 # Pruppacher and Klett
     return diffusion_coeff # m^2/s
 
-def particle_Pr(Tv, S, accom, Dp):
-    Cp_v = air_heat_capacity(S, Tv) # J/(kg*K)
+def particle_Pr(Tv, S, accom, Dp, p=101325.):
+    Cp_v = air_heat_capacity(S, Tv, p=p) # J/(kg*K)
     mu = air_dynamic_viscosity(Tv)  # kg/(m*s)
     #Kg = air_thermal_conductivity(S, Tv, accom, Dp, x_co2=410e-6, p=101325.) # J/(m*s*K)
     Pr = Cp_v*mu/k_h2o_vapor # unitless
     return Pr
 
-def air_heat_capacity(S, Tv):
+def air_heat_capacity(S, Tv, p=101325.):
     Cp_dry_air = 1030.5 - 0.11975*Tv + 3.9734e-4*Tv**2 # J/(kg*K), http://www.mhtlab.uwaterloo.ca/pdf_reports/mhtl_G01.pdf
-    H = specific_humidity(S, Tv, p=101325.)
-    Cp = Cp_dry_air + 1.82*H # J/(kg*K), https://en.wiktionary.org/wiki/humid_heat
+    H = specific_humidity(S, Tv, p=p)
+    # H is a mass fraction of moist air, so mix both heat capacities on
+    # the same mass basis and in J/(kg*K). The legacy dry-air fit is retained.
+    Cp = (1.-H)*Cp_dry_air + H*Cp_h2o_vapor
     return Cp
 
 def specific_humidity(S, Tv, p=101325.):
@@ -472,3 +436,9 @@ def specific_humidity(S, Tv, p=101325.):
 #    denom = 1+(((2*ka)/(accom*Dp*rho_air*Cp))*np.sqrt((2*np.pi*M_air)/(c.r*Tv))) # unitless
 #    Kg = ka/denom # J/(m*s*K)
 #    return Kg
+
+
+def mass_from_diameter(diameter, dry_diameter, aerosol_density):
+    """Total solute-plus-water mass in kg for the thermal ODE state."""
+    return np.pi/6. * (rho_h2o*diameter**3 +
+                       (aerosol_density-rho_h2o)*dry_diameter**3)
