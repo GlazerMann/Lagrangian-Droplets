@@ -26,9 +26,11 @@ parcel_trace_dir = 'parcel_traces/'
 all_particle_trace_dir = 'particle_traces/'
 all_particle_trace_dir_uniformS = 'particle_traces_uniformS/'
 
+submit_jobs = False # generate first; set True to submit to Slurm
+
 run.split_to_nodes(
     avg_SS,number_of_parcels,stop_time=stop_time,dt=dt,
     parcel_trace_dir=parcel_trace_dir, 
     all_particle_trace_dir=all_particle_trace_dir,
     all_particle_trace_dir_uniformS=all_particle_trace_dir_uniformS,
-    N=N,dry_diameter=dry_diameter,kappa=kappa,density=density,odesystem_type='lny')
+    N=N,dry_diameter=dry_diameter,kappa=kappa,density=density,odesystem_type='lny',submit=submit_jobs)

@@ -14,7 +14,7 @@ import time
 
 # ================ USER INPUTS ===================
 number_of_parcels = 50000  # number of trajectories to make
-num_start = 9400
+num_start = 0 # set explicitly when restarting an existing ensemble
 stop_time = 60.0    # total time of trajectories, seconds
 dt = 0.5    # time interval for evaluation of particle growth
 avg_SS = np.linspace(-0.04,0.05,19) # np.linspace(-0.03, 0.03, 3) #supersaturation offset, will be added to supersaturation trajectory

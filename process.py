@@ -7,6 +7,8 @@ Created on Tue Aug  9 09:37:27 2022
 """
 import matplotlib.pyplot as plt
 import pickle
+import os
+from tracepaths import particle_directory
 import numpy as np
 import run
 import parcels
@@ -23,18 +25,20 @@ M_nacl = 58.44/1000.
 
 
 
-def plot_some_trajectories(parcel_nums,output_dir,avg_SS=0.,Slims=[-10,10],Dlims=[0.,25.],add_spatial_trajectories=False,plot_dir = 'figures/'):
+def plot_some_trajectories(parcel_nums,output_dir,avg_SS=0.,Slims=[-10,10],Dlims=[0.,25.],add_spatial_trajectories=False,plot_dir = 'figures/',legacy_representation=None):
+    if not len(parcel_nums):
+        raise ValueError('At least one parcel must be selected')
     fig, axs1 = plt.subplots(len(parcel_nums))
+    axs1 = np.atleast_1d(axs1)
     axs2 = np.array([])
     # axs3 = np.array([])
     fig.set_size_inches(3.5,len(parcel_nums)*1.8)
     ylab_idx = np.floor(len(axs1)/2)
-    particle_trace_dir= output_dir + 'particle_traces/avgSS_' + str(int(avg_SS*100.)).zfill(6) + '/'
-    parcel_trace_dir= output_dir + 'parcel_traces/'
+    particle_trace_dir = particle_directory(os.path.join(output_dir,'particle_traces'), avg_SS)
+    parcel_trace_dir = os.path.join(output_dir,'parcel_traces')
     for pp,(parcel_num,ax1) in enumerate(zip(parcel_nums,axs1)):
-        particle_trace = pickle.load(open(particle_trace_dir + 'particle_' + str(parcel_num).zfill(9) + '.pkl','rb'))
-        ts,lnDp,Tp,T,wv,S,S_crit,D_crit,Ddry,kappa = run.unravel_particle_trace(particle_trace)  
-        Dp=np.exp(lnDp)
+        particle_trace = run.read_particle_trace(parcel_num, particle_trace_dir, legacy_representation)
+        ts,Dp,Tp,T,wv,S,S_crit,D_crit,Ddry,kappa = run.unravel_particle_trace(particle_trace)
         
         # fig, ax1 = plt.subplots(figsize=(4.5,2.5))
         ax2 = ax1.twinx()
@@ -105,8 +109,9 @@ def plot_spatial_trajectory(parcel_num,parcel_trace_dir,ax):
     ax.set_xlim([0.,2.])
     ax.set_ylim([0.,2.])        
     ax.set_zlim([0.,1.])
+    return ax
 
-def plot_activated_fraction_mean_SS(avg_SS, output_dir,plot_dir = 'figures/'):
+def plot_activated_fraction_mean_SS(avg_SS, output_dir,plot_dir = 'figures/',legacy_representation=None):
     all_particle_trace_dir = output_dir+'/particle_traces'
     
     N_tot = []
@@ -118,11 +123,10 @@ def plot_activated_fraction_mean_SS(avg_SS, output_dir,plot_dir = 'figures/'):
     
     for aa, SS in enumerate(avg_SS):
         SS_thresh = SS
-        particle_trace_dir = all_particle_trace_dir + '/avgSS_' + str(int(SS*1000)).zfill(6) +'/'
-        particle_traces = run.read_particle_traces(particle_trace_dir)
+        particle_trace_dir = particle_directory(all_particle_trace_dir, SS)
+        particle_traces = run.read_particle_traces(particle_trace_dir, legacy_representation)
         
         time, Dp, Tp, T, mixing_ratio, SS_env, SS_crit, Dp_crit, Ddry, kappa = run.unravel_particle_traces(particle_traces)
-        Dp=np.exp(Dp)
         Ntot_t = np.zeros([len(time)])
         Nccn_t = np.zeros([len(time)])
         Nccn_t_tau0 = np.zeros([len(time)])
@@ -133,7 +137,7 @@ def plot_activated_fraction_mean_SS(avg_SS, output_dir,plot_dir = 'figures/'):
         Ns = np.zeros(Dp.shape)
         wps = np.zeros(Dp.shape)
         for ii in range(Dp.shape[0]):
-            N_vs_t,wp_vs_t = N_vs_t__settling(N0,time,Dp[ii,:],Tp[ii,:],SS_env[ii,:]+1.,rho_p=1000.,ht=1.)
+            N_vs_t,wp_vs_t = N_vs_t__settling(N0,time,Dp[ii,:],T[ii,:],SS_env[ii,:]+1.,rho_p=1000.,ht=1.)
             Ns[ii,:] = N_vs_t
             wps[ii,:] = wp_vs_t
             
@@ -144,7 +148,7 @@ def plot_activated_fraction_mean_SS(avg_SS, output_dir,plot_dir = 'figures/'):
             Ntot_t[tt] = sum(Ns[:,tt]) 
             Nccn_t[tt] = sum(Ns[:,tt]*(Dp[:,tt]>=Dp_crit)) 
             Nccn_kohler_t[tt] = sum(Ns[:,tt]*(SS_crit <= SS_thresh)) 
-            Nccn_t_tau0[tt] = sum(Ns[:,tt]*(SS_crit <= (SS_env[:,tt]+SS)))
+            Nccn_t_tau0[tt] = sum(Ns[:,tt]*(SS_crit <= SS_env[:,tt]))
         N_tot.append(Ntot_t)
         N_ccn.append(Nccn_t)
         N_ccn_kohler.append(Nccn_kohler_t)
@@ -208,11 +212,11 @@ def get_nonoverlapping_xy(N_samples,r_closest=0.1):
             ys = np.append(ys,y)        
     return xs, ys
 
-def plot_activated_fraction_mean_SS__with_particles(avg_SS,output_dir,plot_dir = 'figures/',ss_plot = [-0.03,0],tt_plot=-1,N_particles=30,r_closest=0.1,droplets_above=True):
+def plot_activated_fraction_mean_SS__with_particles(avg_SS,output_dir,plot_dir = 'figures/',ss_plot = [-0.03,0],tt_plot=-1,N_particles=30,r_closest=0.1,droplets_above=True,legacy_representation=None):
     
     all_particle_trace_dir_uniform = output_dir+'/particle_traces_uniformS'
     
-    all_particle_trace_dir = output_dir + '../output_LagrangeDroplets_old/particle_traces'
+    all_particle_trace_dir = os.path.join(output_dir,'particle_traces')
     
     fig = plt.figure(constrained_layout=True)
     
@@ -276,25 +280,21 @@ def plot_activated_fraction_mean_SS__with_particles(avg_SS,output_dir,plot_dir =
     xs,ys = get_nonoverlapping_xy(N_particles,r_closest=r_closest);
     for aa, SS in enumerate(avg_SS):
         SS = np.round(SS,8)
-        particle_trace_dir = all_particle_trace_dir + '/avgSS_' + str(int(avg_SS[aa]*1000)).zfill(6) +'/'
-        particle_traces = run.read_particle_traces(particle_trace_dir)
+        particle_trace_dir = particle_directory(all_particle_trace_dir, avg_SS[aa])
+        particle_traces = run.read_particle_traces(particle_trace_dir, legacy_representation)
         random_index = random.sample(range(len(particle_traces)),N_particles)
         these_particles = random_index[:N_particles]
         
         
         if SS in ss_plot:
-            particle_trace_dir_uniform = all_particle_trace_dir_uniform + '/avgSS_' + str(int(avg_SS[aa]*1000)).zfill(6) +'/'
-            particle_traces_uniform = run.read_particle_traces(particle_trace_dir_uniform)
+            particle_trace_dir_uniform = particle_directory(all_particle_trace_dir_uniform, avg_SS[aa])
+            particle_traces_uniform = run.read_particle_traces(particle_trace_dir_uniform, legacy_representation)
             time, Dp_uniform_all, Tp, T, mixing_ratio, SS_env, SS_crit, Dp_crit_uniform, Ddry_uniform, kappa = run.unravel_particle_traces(particle_traces_uniform)
-            if len(Dp_uniform_all) == 1:
-                Dp_uniform_all=np.exp(Dp_uniform_all[0])
-            else:
-                Dp_uniform_all=np.exp(Dp_uniform_all)
+            Dp_uniform_all = Dp_uniform_all[0]
             Dp_uniform[jj] = Dp_uniform_all[tt_plot]
-            frac_aerosol_uniform[jj] = Ddry_uniform**3/Dp_uniform_all[tt_plot]**3
+            frac_aerosol_uniform[jj] = Ddry_uniform[0]**3/Dp_uniform_all[tt_plot]**3
             print('aa',aa,'SS',SS,'Dp_uniform[jj]',Dp_uniform[jj])
         time, Dp, Tp, T, mixing_ratio, SS_env, SS_crit, Dp_crit, Ddry, kappa = run.unravel_particle_traces(particle_traces)
-        Dp=np.exp(Dp)
         Ntot_t = np.zeros([len(time)])
         Nccn_t = np.zeros([len(time)])
         Nccn_t_tau0 = np.zeros([len(time)])
@@ -305,7 +305,7 @@ def plot_activated_fraction_mean_SS__with_particles(avg_SS,output_dir,plot_dir =
             Ntot_t[tt] = len(Dp[:,tt]) 
             Nccn_t[tt] = sum(Dp[:,tt]>=Dp_crit) 
             Nccn_kohler_t[tt] = sum(SS_crit <= SS)
-            Nccn_t_tau0[tt] = sum(SS_crit <= (SS_env[:,tt]+SS))
+            Nccn_t_tau0[tt] = sum(SS_crit <= SS_env[:,tt])
         N_tot.append(Ntot_t)
         N_ccn.append(Nccn_t)
         N_ccn_kohler.append(Nccn_kohler_t)
@@ -414,33 +414,52 @@ def plot_activated_fraction_mean_SS__with_particles(avg_SS,output_dir,plot_dir =
     
     return fig,ax,[hln_variable,hln_tau0,hln_uniform]
 
-def N_vs_t__settling(N0,ts,Dp_vs_t,Tv_vs_t,Sv_vs_t,rho_p=1000.,ht=1.):
-    dt = ts[1] - ts[0]
-    N_vs_t = np.zeros(Dp_vs_t.shape)
-    N_vs_t[0] = N0
-    wp_vs_t = np.zeros(Dp_vs_t.shape)
-    for tt in range(0,len(Dp_vs_t)):
-        wp_terminal = get_terminal_velocity(Dp_vs_t[tt],rho_p,Tv_vs_t[tt],Sv_vs_t[tt],x_co2=410e-6,p=101325.)
-        wp_vs_t[tt] = wp_terminal
-        if tt > 0:
-            N_vs_t[tt] = N_vs_t[tt-1]*np.exp(-wp_terminal*dt/ht)
-    return N_vs_t,  wp_vs_t
+def N_vs_t__settling(N0, ts, Dp_vs_t, Tv_vs_t, Sv_vs_t, rho_p=1000., ht=1.):
+    ts = np.asarray(ts, dtype=float)
+    diameters = np.asarray(Dp_vs_t, dtype=float)
+    temperature = np.asarray(Tv_vs_t, dtype=float)
+    saturation = np.asarray(Sv_vs_t, dtype=float)
+    if (ts.ndim != 1 or not len(ts) or np.any(~np.isfinite(ts))
+            or np.any(np.diff(ts) <= 0)):
+        raise ValueError('Settling times must be a nonempty increasing finite vector')
+    if any(values.shape != ts.shape for values in (diameters, temperature, saturation)):
+        raise ValueError('Settling values must match the time grid')
+    if not np.isfinite(ht) or ht <= 0 or not np.isfinite(N0) or N0 < 0:
+        raise ValueError('Settling requires positive height and nonnegative initial number')
+    numbers = np.zeros(ts.shape)
+    numbers[0] = N0
+    speeds = np.zeros(ts.shape)
+    for i in range(len(ts)):
+        speed = float(np.asarray(get_terminal_velocity(diameters[i], rho_p,
+                      temperature[i], saturation[i])).item())
+        speeds[i] = speed
+        if i:
+            numbers[i] = numbers[i-1] * np.exp(-speed*(ts[i]-ts[i-1])/ht)
+    return numbers, speeds
         
-def get_terminal_velocity(Dp,rho_p,Tv_inf,S_inf,x_co2=410e-6,p=101325.):
-    # eqn. 9.49 from Seinfeld and Pandis    
-    rho_g = get_air_density(Tv_inf,S_inf,x_co2=x_co2,p=p)
-    
-    # break out function -- make it jit
-    wp_terminal = fsolve(lambda wp: wp - np.sqrt(c.g*(4*Dp*rho_p)/(3*rho_g*get_drag_coefficient(wp-0.,Dp,Tv_inf,S_inf))),1.)
-    return wp_terminal
+def get_terminal_velocity(Dp, rho_p, Tv_inf, S_inf, x_co2=410e-6, p=101325.):
+    if (not all(np.isfinite(x) for x in (Dp, rho_p, Tv_inf, S_inf, p))
+            or Dp < 0 or rho_p <= 0 or Tv_inf <= 0 or p <= 0):
+        raise ValueError('Terminal velocity requires finite physical inputs')
+    if Dp == 0:
+        return np.array([0.])
+    rho_g = get_air_density(Tv_inf, S_inf, x_co2=x_co2, p=p)
+    if not np.isfinite(rho_g) or rho_g <= 0:
+        raise ValueError('Terminal velocity requires positive gas density')
+    residual = lambda speed: speed - np.sqrt(c.g*(4*Dp*rho_p)/(3*rho_g*
+        get_drag_coefficient(speed, Dp, Tv_inf, S_inf, x_co2=x_co2, p=p)))
+    speed, info, status, message = fsolve(residual, 1., full_output=True)
+    if status != 1 or not np.all(np.isfinite(speed)) or np.any(speed < 0):
+        raise RuntimeError('Terminal velocity did not converge: %s' % message)
+    return speed
 
-def get_drag_coefficient(velocity_diff,Dp,Tv,S):
-    Re = get_particle_Re(velocity_diff,Dp,Tv,S)
+def get_drag_coefficient(velocity_diff,Dp,Tv,S,x_co2=410e-6,p=101325.):
+    Re = get_particle_Re(velocity_diff,Dp,Tv,S,x_co2=x_co2,p=p)
     if Re == 0:
         Cd = 0.
-    elif Re<=1.:
-        Cd = 24/Re
     else:
+        # Apply the same Schiller-Naumann relation on both sides of Re=1.
+        # Switching abruptly from pure Stokes drag creates a root-free gap.
         Cd = (1 + 0.15*Re**0.687)*24/Re
     return Cd
 
